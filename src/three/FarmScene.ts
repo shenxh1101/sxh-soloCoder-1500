@@ -20,6 +20,11 @@ export class FarmScene {
   private sensorLabels: Map<string, HTMLDivElement> = new Map();
   private labelRenderer: HTMLElement | null = null;
 
+  private robotRenderTarget: THREE.WebGLRenderTarget;
+  private robotViewCanvas: HTMLCanvasElement;
+  private robotViewCtx: CanvasRenderingContext2D | null = null;
+  private lastRenderTime: number = 0;
+
   constructor(container: HTMLElement) {
     this.container = container;
     this.scene = new THREE.Scene();
@@ -41,6 +46,18 @@ export class FarmScene {
     this.renderer.shadowMap.type = THREE.PCFShadowMap;
     container.appendChild(this.renderer.domElement);
 
+    this.robotRenderTarget = new THREE.WebGLRenderTarget(480, 270, {
+      minFilter: THREE.LinearFilter,
+      magFilter: THREE.LinearFilter,
+      format: THREE.RGBAFormat,
+      type: THREE.UnsignedByteType,
+    });
+
+    this.robotViewCanvas = document.createElement('canvas');
+    this.robotViewCanvas.width = 480;
+    this.robotViewCanvas.height = 270;
+    this.robotViewCtx = this.robotViewCanvas.getContext('2d');
+
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.05;
@@ -59,6 +76,10 @@ export class FarmScene {
     this.setupGround();
     this.createLabelContainer();
     this.setupEventListeners();
+  }
+
+  public getRobotViewCanvas(): HTMLCanvasElement {
+    return this.robotViewCanvas;
   }
 
   private setupLighting(): void {
@@ -257,9 +278,43 @@ export class FarmScene {
   public render(): void {
     this.controls.update();
     this.renderer.render(this.scene, this.camera);
+
+    if (performance.now() - this.lastRenderTime > 50) {
+      this.renderRobotView();
+      this.lastRenderTime = performance.now();
+    }
   }
 
+  private renderRobotView(): void {
+    const robotCam = this.robot.camera;
+    if (!robotCam) return;
 
+    this.renderer.setRenderTarget(this.robotRenderTarget);
+    this.renderer.clear();
+    this.renderer.render(this.scene, robotCam);
+    this.renderer.setRenderTarget(null);
+
+    if (this.robotViewCtx) {
+      const pixels = new Uint8Array(480 * 270 * 4);
+      this.renderer.readRenderTargetPixels(
+        this.robotRenderTarget,
+        0, 0, 480, 270,
+        pixels
+      );
+
+      const imageData = this.robotViewCtx.createImageData(480, 270);
+      for (let i = 0; i < pixels.length; i += 4) {
+        const y = Math.floor(i / 4 / 480);
+        const flippedY = 269 - y;
+        const targetIdx = (flippedY * 480 + (i / 4) % 480) * 4;
+        imageData.data[targetIdx] = pixels[i];
+        imageData.data[targetIdx + 1] = pixels[i + 1];
+        imageData.data[targetIdx + 2] = pixels[i + 2];
+        imageData.data[targetIdx + 3] = 255;
+      }
+      this.robotViewCtx.putImageData(imageData, 0, 0);
+    }
+  }
 
   public startAnimationLoop(callback?: (time: number) => void): void {
     const animate = (time: number) => {
@@ -305,6 +360,7 @@ export class FarmScene {
       this.labelRenderer.parentNode.removeChild(this.labelRenderer);
     }
 
+    this.robotRenderTarget.dispose();
     this.cageRack.dispose();
     this.robot.dispose();
 

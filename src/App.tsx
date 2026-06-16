@@ -4,6 +4,7 @@ import { ControlPanel } from './components/ControlPanel';
 import { RobotView } from './components/RobotView';
 import { AlertList } from './components/AlertList';
 import { StatusBar } from './components/StatusBar';
+import { TrendPanel } from './components/TrendPanel';
 import { useFarmStore } from './store/useFarmStore';
 import { generateSensorData } from './utils/dataGenerator';
 
@@ -27,9 +28,11 @@ const App: React.FC = () => {
     cleanupOldHistory,
     feedFloor,
     feedAll,
+    addScheduleExecutionRecord,
   } = useFarmStore();
 
   const [isSceneReady, setIsSceneReady] = useState(false);
+  const [robotViewCanvas, setRobotViewCanvas] = useState<HTMLCanvasElement | null>(null);
 
   useEffect(() => {
     if (!sceneContainerRef.current) return;
@@ -43,6 +46,7 @@ const App: React.FC = () => {
       scene.focusOnCage(cageId);
     });
 
+    setRobotViewCanvas(scene.getRobotViewCanvas());
     setIsSceneReady(true);
 
     return () => {
@@ -97,7 +101,8 @@ const App: React.FC = () => {
     if (!isAutoInspecting || !farmSceneRef.current || robot.status !== 'idle') return;
 
     const interval = setInterval(() => {
-      if (robot.status !== 'idle') return;
+      if (useFarmStore.getState().robot.status !== 'idle') return;
+      if (useFarmStore.getState().feedQueue.isActive) return;
 
       const allCages = [...cages].sort((a, b) => {
         if (a.floor !== b.floor) return a.floor - b.floor;
@@ -111,14 +116,17 @@ const App: React.FC = () => {
     }, 3000);
 
     return () => clearInterval(interval);
-  }, [isAutoInspecting, robot.status]);
+  }, [isAutoInspecting, robot.status, cages]);
 
   const checkTimerSchedules = () => {
     const now = new Date();
     const currentTime = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+    const todayStr = now.toISOString().split('T')[0];
+    const state = useFarmStore.getState();
 
-    timerSchedules.forEach(async (schedule) => {
+    state.timerSchedules.forEach(async (schedule) => {
       if (!schedule.enabled) return;
+      if (schedule.pausedDates.includes(todayStr)) return;
       if (schedule.time !== currentTime) return;
       
       if (schedule.lastExecuted) {
@@ -128,19 +136,48 @@ const App: React.FC = () => {
         }
       }
 
-      if (useFarmStore.getState().robot.status !== 'idle') return;
+      const currState = useFarmStore.getState();
+      if (currState.robot.status !== 'idle') {
+        addScheduleExecutionRecord(schedule.id, {
+          scheduleId: schedule.id,
+          scheduledTime: schedule.time,
+          actualTime: now,
+          status: 'skipped',
+          target: schedule.target,
+          message: '机器人忙碌中',
+        });
+        return;
+      }
 
-      useFarmStore.setState((state) => ({
-        timerSchedules: state.timerSchedules.map(s =>
+      useFarmStore.setState((s) => ({
+        timerSchedules: s.timerSchedules.map(s =>
           s.id === schedule.id ? { ...s, lastExecuted: now } : s
         ),
       }));
 
-      if (schedule.target === 'all') {
-        await feedAll('scheduled');
-      } else {
-        const floorNum = parseInt(schedule.target.slice(-1));
-        await feedFloor(floorNum, 'scheduled');
+      try {
+        if (schedule.target === 'all') {
+          await feedAll('scheduled');
+        } else {
+          const floorNum = parseInt(schedule.target.slice(-1));
+          await feedFloor(floorNum, 'scheduled');
+        }
+        addScheduleExecutionRecord(schedule.id, {
+          scheduleId: schedule.id,
+          scheduledTime: schedule.time,
+          actualTime: now,
+          status: 'success',
+          target: schedule.target,
+        });
+      } catch (e) {
+        addScheduleExecutionRecord(schedule.id, {
+          scheduleId: schedule.id,
+          scheduledTime: schedule.time,
+          actualTime: now,
+          status: 'failed',
+          target: schedule.target,
+          message: e instanceof Error ? e.message : '未知错误',
+        });
       }
     });
   };
@@ -155,9 +192,10 @@ const App: React.FC = () => {
           className="w-full h-full"
         />
         
-        <RobotView />
+        <RobotView sceneCanvas={robotViewCanvas} />
         <AlertList />
         <StatusBar />
+        <TrendPanel />
         
         <div className="absolute top-4 left-4 bg-slate-900/80 backdrop-blur-xl rounded-xl px-4 py-3 border border-slate-700/50">
           <div className="text-xs text-slate-400 mb-1">操作提示</div>

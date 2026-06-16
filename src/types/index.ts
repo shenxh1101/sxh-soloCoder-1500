@@ -32,12 +32,26 @@ export interface SensorHistory {
   humidity: number;
 }
 
+export type ScheduleExecutionStatus = 'success' | 'skipped' | 'failed';
+
+export interface ScheduleExecutionRecord {
+  id: string;
+  scheduleId: string;
+  scheduledTime: string;
+  actualTime: Date;
+  status: ScheduleExecutionStatus;
+  target: 'all' | 'floor1' | 'floor2' | 'floor3';
+  message?: string;
+}
+
 export interface TimerSchedule {
   id: string;
   time: string;
   enabled: boolean;
   target: 'all' | 'floor1' | 'floor2' | 'floor3';
   lastExecuted: Date | null;
+  pausedDates: string[];
+  executionHistory: ScheduleExecutionRecord[];
 }
 
 export interface SystemConfig {
@@ -45,6 +59,13 @@ export interface SystemConfig {
   tempMax: number;
   humidityMin: number;
   humidityMax: number;
+}
+
+export interface ConfigValidation {
+  tempMin: { valid: boolean; error?: string };
+  tempMax: { valid: boolean; error?: string };
+  humidityMin: { valid: boolean; error?: string };
+  humidityMax: { valid: boolean; error?: string };
 }
 
 export interface DailyReport {
@@ -59,6 +80,24 @@ export interface DailyReport {
 
 export type FeedTarget = 'single' | 'floor' | 'all';
 
+export type FeedQueueFilterType = 'floor' | 'alert' | 'overdue' | 'all';
+
+export interface FeedQueueItem {
+  cageId: string;
+  status: 'pending' | 'in_progress' | 'completed' | 'skipped' | 'failed';
+}
+
+export interface FeedQueueState {
+  isActive: boolean;
+  items: FeedQueueItem[];
+  currentIndex: number;
+  filterType: FeedQueueFilterType;
+  filterFloor?: 1 | 2 | 3;
+  overdueHours?: number;
+}
+
+export type TrendViewMode = 'single' | 'floor';
+
 export interface FarmState {
   cages: Cage[];
   robot: RobotState;
@@ -66,23 +105,40 @@ export interface FarmState {
   sensorHistory: SensorHistory[];
   timerSchedules: TimerSchedule[];
   systemConfig: SystemConfig;
+  lastValidConfig: SystemConfig;
+  configValidation: ConfigValidation;
   selectedCageId: string | null;
+  selectedFloorForTrend: 1 | 2 | 3;
+  trendViewMode: TrendViewMode;
   isAutoInspecting: boolean;
-  
+  feedQueue: FeedQueueState;
+
   updateCageSensor: (cageId: string, temp: number, humidity: number) => void;
   selectCage: (cageId: string | null) => void;
+  setTrendViewMode: (mode: TrendViewMode) => void;
+  setSelectedFloorForTrend: (floor: 1 | 2 | 3) => void;
   feedCage: (cageId: string, type: 'manual' | 'scheduled' | 'batch') => Promise<void>;
   feedFloor: (floor: number, type: 'manual' | 'scheduled' | 'batch') => Promise<void>;
   feedAll: (type: 'manual' | 'scheduled' | 'batch') => Promise<void>;
   moveRobotTo: (cageId: string) => Promise<void>;
   checkAlerts: () => void;
   updateConfig: (config: Partial<SystemConfig>) => void;
-  addTimerSchedule: (schedule: Omit<TimerSchedule, 'id' | 'lastExecuted'>) => void;
+  commitConfig: () => void;
+  resetConfig: () => void;
+  addTimerSchedule: (schedule: Omit<TimerSchedule, 'id' | 'lastExecuted' | 'pausedDates' | 'executionHistory'>) => void;
+  updateTimerSchedule: (id: string, updates: Partial<Omit<TimerSchedule, 'id'>>) => void;
   removeTimerSchedule: (id: string) => void;
   toggleTimerSchedule: (id: string) => void;
+  toggleSchedulePauseForDate: (id: string, dateStr: string) => void;
+  addScheduleExecutionRecord: (scheduleId: string, record: Omit<ScheduleExecutionRecord, 'id'>) => void;
   generateDailyReport: () => DailyReport;
   exportSensorHistoryToCSV: () => string;
   toggleAutoInspect: () => void;
   addSensorHistory: (cageId: string, temp: number, humidity: number) => void;
   cleanupOldHistory: () => void;
+
+  createFeedQueue: (filterType: FeedQueueFilterType, filterFloor?: 1 | 2 | 3, overdueHours?: number) => void;
+  startFeedQueue: () => Promise<void>;
+  skipNextInQueue: () => void;
+  cancelFeedQueue: () => void;
 }

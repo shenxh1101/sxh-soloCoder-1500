@@ -1,18 +1,44 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Video } from 'lucide-react';
 import { useFarmStore } from '../store/useFarmStore';
 
-export const RobotView: React.FC = () => {
+interface RobotViewProps {
+  sceneCanvas?: HTMLCanvasElement | null;
+}
+
+export const RobotView: React.FC<RobotViewProps> = ({ sceneCanvas }) => {
   const { robot, cages, selectedCageId } = useFarmStore();
   const currentCage = cages.find(c => c.id === robot.currentCageId);
   const selectedCage = cages.find(c => c.id === selectedCageId);
   const displayCage = currentCage || selectedCage;
   const [time, setTime] = useState(new Date());
+  const displayCanvasRef = useRef<HTMLCanvasElement>(null);
+  const animationFrameRef = useRef<number | null>(null);
 
   useEffect(() => {
     const timer = setInterval(() => setTime(new Date()), 1000);
     return () => clearInterval(timer);
   }, []);
+
+  useEffect(() => {
+    if (!sceneCanvas || !displayCanvasRef.current) return;
+    const source = sceneCanvas;
+    const target = displayCanvasRef.current;
+    const targetCtx = target.getContext('2d');
+    if (!targetCtx) return;
+
+    const render = () => {
+      targetCtx.drawImage(source, 0, 0, target.width, target.height);
+      animationFrameRef.current = requestAnimationFrame(render);
+    };
+    render();
+
+    return () => {
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current);
+      }
+    };
+  }, [sceneCanvas]);
 
   return (
     <div className="absolute top-4 right-4 w-72 bg-slate-900/90 backdrop-blur-xl rounded-xl border border-green-500/30 overflow-hidden shadow-2xl shadow-green-500/10">
@@ -29,14 +55,18 @@ export const RobotView: React.FC = () => {
       
       <div className="relative">
         <div className="w-full aspect-video bg-gradient-to-br from-slate-800 via-slate-900 to-slate-800 relative overflow-hidden">
-          <img
-            src={`https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=${encodeURIComponent(`metal cage grid, industrial farm equipment, animal cage, surveillance camera view, dim lighting, security camera perspective, photorealistic`)}&image_size=landscape_16_9`}
-            alt="笼位监控画面"
-            className="w-full h-full object-cover opacity-80"
-            onError={(e) => {
-              (e.target as HTMLImageElement).style.display = 'none';
-            }}
-          />
+          {sceneCanvas ? (
+            <canvas
+              ref={displayCanvasRef}
+              width={480}
+              height={270}
+              className="w-full h-full object-cover"
+            />
+          ) : (
+            <div className="w-full h-full flex items-center justify-center text-slate-500 text-sm">
+              初始化摄像头...
+            </div>
+          )}
           
           <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-black/30" />
           
