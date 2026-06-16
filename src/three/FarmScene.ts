@@ -267,9 +267,12 @@ export class FarmScene {
       time
     );
 
-    const currentCage = cages.find(c => c.id === robotState.currentCageId);
-    if (currentCage) {
-      this.robot.updateCameraPosition(currentCage.floor, currentCage.position);
+    const targetCageId = robotState.targetCageId || robotState.currentCageId;
+    if (targetCageId) {
+      const targetCage = cages.find(c => c.id === targetCageId);
+      if (targetCage) {
+        this.robot.updateCameraPosition(targetCage.floor, targetCage.position);
+      }
     }
 
     this.robot.updateAnimation(time, robotState.status === 'feeding');

@@ -5,10 +5,11 @@ import {
   PlayCircle, PauseCircle, FileText, Download, Clock,
   ChevronDown, ChevronUp, Trash2, Plus, AlertCircle, Check, X,
   Edit3, Calendar, SkipForward, Square, ListTodo, Gauge,
+  Activity, TrendingDown, Shield, Zap, Eye,
 } from 'lucide-react';
 import { downloadCSV } from '../utils/csvExporter';
 import { formatReportAsText } from '../utils/reportGenerator';
-import { FeedQueueFilterType, TimerSchedule } from '../types';
+import { FeedQueueFilterType, TimerSchedule, InspectionSortMode, RiskFactorKey } from '../types';
 
 export const ControlPanel: React.FC = () => {
   const {
@@ -21,6 +22,10 @@ export const ControlPanel: React.FC = () => {
     isAutoInspecting,
     robot,
     feedQueue,
+    inspection,
+    inspectionRecords,
+    healthScores,
+    riskRank,
     selectCage,
     feedCage,
     feedFloor,
@@ -40,16 +45,28 @@ export const ControlPanel: React.FC = () => {
     startFeedQueue,
     skipNextInQueue,
     cancelFeedQueue,
+    createInspectionTask,
+    startInspection,
+    skipNextInspection,
+    cancelInspection,
+    computeHealthScores,
+    computeRiskRank,
+    createFeedQueueFromRiskTop,
   } = useFarmStore();
 
   const [expandedSections, setExpandedSections] = useState({
     cageSelect: true,
     feedControl: true,
     feedQueue: false,
+    inspection: false,
+    healthScore: false,
     thresholds: true,
     schedule: true,
     reports: true,
   });
+
+  const [inspectionSortMode, setInspectionSortMode] = useState<InspectionSortMode>('floor');
+  const [riskTopCount, setRiskTopCount] = useState(5);
 
   const [newScheduleTime, setNewScheduleTime] = useState('08:00');
   const [newScheduleTarget, setNewScheduleTarget] = useState<'all' | 'floor1' | 'floor2' | 'floor3'>('all');
@@ -167,6 +184,63 @@ export const ControlPanel: React.FC = () => {
     : 0;
 
   const todayStr = new Date().toISOString().split('T')[0];
+
+  const handleCreateInspection = () => {
+    createInspectionTask(inspectionSortMode);
+  };
+
+  const handleStartInspection = async () => {
+    await startInspection();
+  };
+
+  const handleRefreshHealth = () => {
+    computeHealthScores();
+    computeRiskRank();
+  };
+
+  const handleCreateRiskFeedQueue = () => {
+    createFeedQueueFromRiskTop(riskTopCount);
+  };
+
+  const getHealthLevelColor = (level: string) => {
+    switch (level) {
+      case 'excellent': return 'text-emerald-400 bg-emerald-500/10';
+      case 'good': return 'text-green-400 bg-green-500/10';
+      case 'warning': return 'text-yellow-400 bg-yellow-500/10';
+      case 'danger': return 'text-red-400 bg-red-500/10';
+      default: return 'text-slate-400 bg-slate-500/10';
+    }
+  };
+
+  const getHealthLevelText = (level: string) => {
+    switch (level) {
+      case 'excellent': return '优秀';
+      case 'good': return '良好';
+      case 'warning': return '警告';
+      case 'danger': return '危险';
+      default: return '未知';
+    }
+  };
+
+  const getRiskFactorText = (factor: RiskFactorKey) => {
+    switch (factor) {
+      case 'consecutiveAlerts': return '连续异常';
+      case 'hoursWithoutFeed': return '久未投料';
+      case 'fluctuation': return '波动过大';
+      default: return '未知';
+    }
+  };
+
+  const inspectionCompletedCount = inspection.items.filter(i => i.status === 'completed').length;
+  const inspectionSkippedCount = inspection.items.filter(i => i.status === 'skipped').length;
+  const inspectionProgress = inspection.items.length > 0
+    ? ((inspectionCompletedCount + inspectionSkippedCount) / inspection.items.length) * 100
+    : 0;
+
+  const currentInspectionItem = inspection.items[inspection.currentIndex];
+  const nextInspectionItem = inspection.items.find((item, idx) => 
+    idx > inspection.currentIndex && item.status === 'pending'
+  );
 
   const startEditSchedule = (schedule: TimerSchedule) => {
     setEditingScheduleId(schedule.id);
@@ -563,6 +637,338 @@ export const ControlPanel: React.FC = () => {
                   </div>
                 </div>
               )}
+            </div>
+          )}
+        </div>
+
+        {/* 巡检任务编排 */}
+        <div className="bg-slate-800/50 rounded-xl overflow-hidden border border-slate-700/50">
+          <button
+            onClick={() => toggleSection('inspection')}
+            className="w-full p-3 flex items-center justify-between text-left hover:bg-slate-700/30 transition-colors"
+          >
+            <span className="text-white font-semibold flex items-center gap-2">
+              <Eye size={18} className="text-cyan-400" /> 巡检任务编排
+            </span>
+            {expandedSections.inspection ? <ChevronUp size={18} className="text-slate-400" /> : <ChevronDown size={18} className="text-slate-400" />}
+          </button>
+          
+          {expandedSections.inspection && (
+            <div className="p-3 pt-0 space-y-3">
+              <div className="space-y-2">
+                <div className="text-xs text-slate-400">排序方式</div>
+                <div className="flex gap-1">
+                  {([
+                    { key: 'floor', label: '按楼层', icon: '🏢' },
+                    { key: 'alertFirst', label: '异常优先', icon: '⚠️' },
+                    { key: 'fixedRoute', label: '固定路线', icon: '🧭' },
+                  ] as const).map(item => (
+                    <button
+                      key={item.key}
+                      onClick={() => setInspectionSortMode(item.key)}
+                      className={`flex-1 py-2 px-1.5 rounded-lg text-xs font-medium transition-all ${
+                        inspectionSortMode === item.key
+                          ? 'bg-cyan-600 text-white'
+                          : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
+                      }`}
+                    >
+                      <div className="text-base mb-0.5">{item.icon}</div>
+                      {item.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <button
+                onClick={handleCreateInspection}
+                disabled={inspection.isActive || robot.status !== 'idle'}
+                className="w-full py-2 px-3 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm rounded-lg transition-all flex items-center justify-center gap-1"
+              >
+                <ListTodo size={14} />
+                生成巡检任务
+              </button>
+
+              {inspection.items.length > 0 && (
+                <div className="space-y-3">
+                  <div className="bg-slate-900/50 rounded-lg p-3 space-y-2">
+                    {inspection.isActive && (
+                      <>
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="text-slate-400">当前任务</span>
+                          <span className="text-cyan-400 font-mono font-medium">
+                            {currentInspectionItem?.cageId || '-'}
+                          </span>
+                        </div>
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="text-slate-400">下一笼位</span>
+                          <span className="text-slate-300 font-mono">
+                            {nextInspectionItem?.cageId || '-'}
+                          </span>
+                        </div>
+                        {inspection.estimatedEndTime && (
+                          <div className="flex items-center justify-between text-xs">
+                            <span className="text-slate-400">预计完成</span>
+                            <span className="text-green-400 font-mono">
+                              {inspection.estimatedEndTime.toLocaleTimeString()}
+                            </span>
+                          </div>
+                        )}
+                      </>
+                    )}
+
+                    <div className="flex justify-between items-center text-xs pt-1">
+                      <span className="text-slate-400">进度</span>
+                      <span className="text-white font-mono">
+                        {inspectionCompletedCount + inspectionSkippedCount}/{inspection.items.length}
+                      </span>
+                    </div>
+                    <div className="h-2 bg-slate-700 rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-gradient-to-r from-cyan-500 to-blue-500 transition-all duration-300"
+                        style={{ width: `${inspectionProgress}%` }}
+                      />
+                    </div>
+                    <div className="flex gap-3 text-xs">
+                      <span className="text-green-400">✓ {inspectionCompletedCount}</span>
+                      <span className="text-yellow-400">⏭ {inspectionSkippedCount}</span>
+                      <span className="text-slate-400">⏳ {inspection.items.filter(i => i.status === 'pending').length}</span>
+                    </div>
+                  </div>
+
+                  <div className="max-h-32 overflow-y-auto space-y-1">
+                    {inspection.items.map((item, idx) => {
+                      const statusColors: Record<string, string> = {
+                        pending: 'bg-slate-700 text-slate-400',
+                        in_progress: 'bg-cyan-600/30 text-cyan-400 border border-cyan-500/50',
+                        completed: 'bg-green-600/20 text-green-400',
+                        skipped: 'bg-yellow-600/20 text-yellow-400',
+                      };
+                      const statusText: Record<string, string> = {
+                        pending: '等待',
+                        in_progress: '巡检中',
+                        completed: '完成',
+                        skipped: '跳过',
+                      };
+                      return (
+                        <div
+                          key={idx}
+                          className={`flex items-center justify-between px-2 py-1.5 rounded text-xs font-mono ${statusColors[item.status]}`}
+                        >
+                          <div className="flex items-center gap-2">
+                            <span className="w-5 text-slate-500">{idx + 1}</span>
+                            <span>{item.cageId}</span>
+                            {item.hasAlertDuring && <AlertCircle size={10} className="text-red-400" />}
+                          </div>
+                          <span className="text-[10px]">{statusText[item.status]}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  <div className="flex gap-2">
+                    {!inspection.isActive && inspectionCompletedCount + inspectionSkippedCount === 0 ? (
+                      <button
+                        onClick={handleStartInspection}
+                        disabled={robot.status !== 'idle'}
+                        className="flex-1 py-2 px-3 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 disabled:opacity-50 text-white text-sm rounded-lg transition-all flex items-center justify-center gap-1"
+                      >
+                        <PlayCircle size={14} />
+                        开始巡检
+                      </button>
+                    ) : null}
+                    {inspection.isActive && (
+                      <>
+                        <button
+                          onClick={skipNextInspection}
+                          className="flex-1 py-2 px-3 bg-yellow-600 hover:bg-yellow-500 text-white text-sm rounded-lg transition-all flex items-center justify-center gap-1"
+                        >
+                          <SkipForward size={14} />
+                          跳过下一个
+                        </button>
+                        <button
+                          onClick={cancelInspection}
+                          className="flex-1 py-2 px-3 bg-red-600 hover:bg-red-500 text-white text-sm rounded-lg transition-all flex items-center justify-center gap-1"
+                        >
+                          <Square size={14} />
+                          取消
+                        </button>
+                      </>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {inspectionRecords.length > 0 && (
+                <div className="pt-2 border-t border-slate-700/50">
+                  <div className="text-xs text-slate-400 mb-2">最近巡检记录</div>
+                  <div className="max-h-20 overflow-y-auto space-y-1">
+                    {[...inspectionRecords].reverse().slice(0, 5).map(record => (
+                      <div
+                        key={record.id}
+                        className={`flex items-center justify-between px-2 py-1 rounded text-xs ${
+                          record.hasAlert
+                            ? 'bg-red-500/10 text-red-400'
+                            : 'bg-slate-700/30 text-slate-300'
+                        }`}
+                      >
+                        <span className="font-mono">{record.cageId}</span>
+                        <span className="text-[10px]">
+                          {record.inspectedAt.toLocaleTimeString()}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* 健康评分与风险榜 */}
+        <div className="bg-slate-800/50 rounded-xl overflow-hidden border border-slate-700/50">
+          <button
+            onClick={() => toggleSection('healthScore')}
+            className="w-full p-3 flex items-center justify-between text-left hover:bg-slate-700/30 transition-colors"
+          >
+            <span className="text-white font-semibold flex items-center gap-2">
+              <Activity size={18} className="text-rose-400" /> 健康评分 & 风险榜
+            </span>
+            {expandedSections.healthScore ? <ChevronUp size={18} className="text-slate-400" /> : <ChevronDown size={18} className="text-slate-400" />}
+          </button>
+          
+          {expandedSections.healthScore && (
+            <div className="p-3 pt-0 space-y-3">
+              <button
+                onClick={handleRefreshHealth}
+                className="w-full py-2 px-3 bg-slate-700 hover:bg-slate-600 text-white text-sm rounded-lg transition-all flex items-center justify-center gap-1"
+              >
+                <Activity size={14} />
+                刷新健康评分
+              </button>
+
+              {selectedCageId && healthScores[selectedCageId] && (
+                <div className="bg-slate-900/50 rounded-lg p-3">
+                  <div className="text-xs text-slate-400 mb-2">{selectedCageId} 健康详情</div>
+                  <div className="flex items-center gap-3 mb-3">
+                    <div className={`text-2xl font-bold px-3 py-1 rounded-lg ${getHealthLevelColor(healthScores[selectedCageId].level)}`}>
+                      {healthScores[selectedCageId].score}
+                    </div>
+                    <div>
+                      <div className={`text-sm font-medium ${
+                        healthScores[selectedCageId].level === 'danger' ? 'text-red-400' :
+                        healthScores[selectedCageId].level === 'warning' ? 'text-yellow-400' :
+                        healthScores[selectedCageId].level === 'good' ? 'text-green-400' : 'text-emerald-400'
+                      }`}>
+                        {getHealthLevelText(healthScores[selectedCageId].level)}
+                      </div>
+                      <div className="text-xs text-slate-500">健康指数</div>
+                    </div>
+                  </div>
+                  <div className="space-y-1.5 text-xs">
+                    <div className="flex justify-between">
+                      <span className="text-slate-400">连续异常</span>
+                      <span className={healthScores[selectedCageId].factors.consecutiveAlerts > 0 ? 'text-red-400' : 'text-slate-300'}>
+                        {healthScores[selectedCageId].factors.consecutiveAlerts} 次
+                      </span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-slate-400">未投料时长</span>
+                      <span className="text-slate-300">
+                        {healthScores[selectedCageId].factors.hoursWithoutFeed.toFixed(1)} 小时
+                      </span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-slate-400">温度波动</span>
+                      <span className="text-slate-300">
+                        {healthScores[selectedCageId].factors.temperatureFluctuation.toFixed(1)}°C
+                      </span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-slate-400">湿度波动</span>
+                      <span className="text-slate-300">
+                        {healthScores[selectedCageId].factors.humidityFluctuation.toFixed(1)}%
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              <div>
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-xs text-slate-400">风险榜 TOP {riskTopCount}</span>
+                  <div className="flex items-center gap-1">
+                    <button
+                      onClick={() => setRiskTopCount(Math.max(3, riskTopCount - 1))}
+                      className="w-5 h-5 bg-slate-700 hover:bg-slate-600 rounded text-xs text-slate-300"
+                    >
+                      -
+                    </button>
+                    <span className="text-xs text-slate-300 w-4 text-center">{riskTopCount}</span>
+                    <button
+                      onClick={() => setRiskTopCount(Math.min(10, riskTopCount + 1))}
+                      className="w-5 h-5 bg-slate-700 hover:bg-slate-600 rounded text-xs text-slate-300"
+                    >
+                      +
+                    </button>
+                  </div>
+                </div>
+                {riskRank.length > 0 ? (
+                  <div className="space-y-1">
+                    {riskRank.slice(0, riskTopCount).map((item, idx) => (
+                      <div
+                        key={item.cageId}
+                        className={`flex items-center justify-between px-2 py-1.5 rounded text-xs cursor-pointer transition-colors ${
+                          selectedCageId === item.cageId
+                            ? 'bg-blue-500/20 border border-blue-500/30'
+                            : 'bg-slate-700/30 hover:bg-slate-700/50'
+                        }`}
+                        onClick={() => selectCage(item.cageId)}
+                      >
+                        <div className="flex items-center gap-2">
+                          <span className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold ${
+                            idx === 0 ? 'bg-red-500 text-white' :
+                            idx === 1 ? 'bg-orange-500 text-white' :
+                            idx === 2 ? 'bg-yellow-500 text-slate-900' :
+                            'bg-slate-600 text-slate-300'
+                          }`}>
+                            {idx + 1}
+                          </span>
+                          <span className="font-mono text-slate-200">{item.cageId}</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className={`text-[10px] px-1.5 py-0.5 rounded ${
+                            item.primaryRisk === 'consecutiveAlerts' ? 'bg-red-500/20 text-red-400' :
+                            item.primaryRisk === 'hoursWithoutFeed' ? 'bg-yellow-500/20 text-yellow-400' :
+                            'bg-purple-500/20 text-purple-400'
+                          }`}>
+                            {getRiskFactorText(item.primaryRisk)}
+                          </span>
+                          <span className={`font-mono font-bold ${
+                            item.level === 'danger' ? 'text-red-400' :
+                            item.level === 'warning' ? 'text-yellow-400' :
+                            item.level === 'good' ? 'text-green-400' : 'text-emerald-400'
+                          }`}>
+                            {item.healthScore}
+                          </span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="text-xs text-slate-500 text-center py-4">
+                    点击"刷新健康评分"生成风险榜
+                  </div>
+                )}
+              </div>
+
+              <button
+                onClick={handleCreateRiskFeedQueue}
+                disabled={riskRank.length === 0 || feedQueue.isActive || robot.status !== 'idle'}
+                className="w-full py-2 px-3 bg-gradient-to-r from-orange-600 to-red-600 hover:from-orange-500 hover:to-red-500 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm rounded-lg transition-all flex items-center justify-center gap-1"
+              >
+                <UtensilsCrossed size={14} />
+                为风险榜 TOP {riskTopCount} 生成投料队列
+              </button>
             </div>
           )}
         </div>

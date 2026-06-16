@@ -15,6 +15,7 @@ const App: React.FC = () => {
   const lastSensorUpdateRef = useRef<number>(0);
   const lastHistoryUpdateRef = useRef<number>(0);
   const lastScheduleCheckRef = useRef<number>(0);
+  const lastHealthUpdateRef = useRef<number>(0);
   const autoInspectIndexRef = useRef<number>(0);
   
   const {
@@ -29,6 +30,8 @@ const App: React.FC = () => {
     feedFloor,
     feedAll,
     addScheduleExecutionRecord,
+    computeHealthScores,
+    computeRiskRank,
   } = useFarmStore();
 
   const [isSceneReady, setIsSceneReady] = useState(false);
@@ -48,6 +51,9 @@ const App: React.FC = () => {
 
     setRobotViewCanvas(scene.getRobotViewCanvas());
     setIsSceneReady(true);
+
+    computeHealthScores();
+    computeRiskRank();
 
     return () => {
       scene.dispose();
@@ -83,6 +89,12 @@ const App: React.FC = () => {
       if (time - lastScheduleCheckRef.current > 10000) {
         checkTimerSchedules();
         lastScheduleCheckRef.current = time;
+      }
+
+      if (time - lastHealthUpdateRef.current > 60000) {
+        computeHealthScores();
+        computeRiskRank();
+        lastHealthUpdateRef.current = time;
       }
 
       animationFrameRef.current = requestAnimationFrame(animate);

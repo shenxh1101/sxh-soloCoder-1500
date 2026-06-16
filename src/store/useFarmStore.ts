@@ -1,5 +1,9 @@
 import { create } from 'zustand';
-import { FarmState, Cage, TimerSchedule, FeedQueueItem, FeedQueueFilterType, ConfigValidation, SystemConfig } from '../types';
+import {
+  FarmState, Cage, TimerSchedule, FeedQueueItem, FeedQueueFilterType,
+  ConfigValidation, SystemConfig, InspectionSortMode, InspectionState,
+  InspectionTaskItem, CageHealthScore, RiskRankItem, RiskFactorKey,
+} from '../types';
 import { generateInitialCages, generate24HourHistory, getCagePosition } from '../utils/dataGenerator';
 import { generateDailyReport } from '../utils/reportGenerator';
 import { exportSensorHistoryToCSV } from '../utils/csvExporter';
@@ -96,16 +100,26 @@ export const useFarmStore = create<FarmState>((set, get) => ({
     currentIndex: 0,
     filterType: 'all',
   },
+  inspection: {
+    isActive: false,
+    items: [],
+    currentIndex: 0,
+    sortMode: 'floor',
+    totalDurationMs: 0,
+  },
+  inspectionRecords: [],
+  healthScores: {},
+  riskRank: [],
 
   updateCageSensor: (cageId: string, temperature: number, humidity: number) => {
-    const { systemConfig } = get();
+    const { lastValidConfig } = get();
     
     set((state) => ({
       cages: state.cages.map((cage) => {
         if (cage.id !== cageId) return cage;
         
-        const hasTempAlert = temperature < systemConfig.tempMin || temperature > systemConfig.tempMax;
-        const hasHumidityAlert = humidity < systemConfig.humidityMin || humidity > systemConfig.humidityMax;
+        const hasTempAlert = temperature < lastValidConfig.tempMin || temperature > lastValidConfig.tempMax;
+        const hasHumidityAlert = humidity < lastValidConfig.humidityMin || humidity > lastValidConfig.humidityMax;
         const hasAlert = hasTempAlert || hasHumidityAlert;
         const alertType = hasTempAlert ? 'temperature' : hasHumidityAlert ? 'humidity' : null;
         
@@ -507,5 +521,315 @@ export const useFarmStore = create<FarmState>((set, get) => ({
     set((state) => ({
       feedQueue: { ...state.feedQueue, isActive: false },
     }));
+  },
+
+  createInspectionTask: (sortMode: InspectionSortMode) => {
+    const { cages } = get();
+    let sortedCages: Cage[] = [];
+
+    switch (sortMode) {
+      case 'alertFirst':
+        sortedCages = [...cages].sort((a, b) => {
+          if (a.hasAlert !== b.hasAlert) return a.hasAlert ? -1 : 1;
+          if (a.floor !== b.floor) return a.floor - b.floor;
+          return a.position - b.position;
+        });
+        break;
+      case 'fixedRoute': {
+        const order: { floor: number; position: number }[] = [];
+        for (let floor = 1; floor <= 3; floor++) {
+          if (floor % 2 === 1) {
+            for (let pos = 1; pos <= 8; pos++) order.push({ floor, position: pos });
+          } else {
+            for (let pos = 8; pos >= 1; pos--) order.push({ floor, position: pos });
+          }
+        }
+        sortedCages = order
+          .map(o => cages.find(c => c.floor === o.floor && c.position === o.position)!)
+          .filter(Boolean);
+        break;
+      }
+      default:
+        sortedCages = [...cages].sort((a, b) => {
+          if (a.floor !== b.floor) return a.floor - b.floor;
+          return a.position - b.position;
+        });
+    }
+
+    const items: InspectionTaskItem[] = sortedCages.map(cage => ({
+      cageId: cage.id,
+      status: 'pending',
+    }));
+
+    const perCageMs = 3000;
+    const totalDurationMs = items.length * perCageMs;
+
+    set({
+      inspection: {
+        isActive: false,
+        items,
+        currentIndex: 0,
+        sortMode,
+        totalDurationMs,
+      },
+    });
+  },
+
+  startInspection: async (): Promise<void> => {
+    const { moveRobotTo, inspectionRecords } = get();
+    let items = get().inspection.items;
+    if (items.length === 0) return;
+
+    const startTime = new Date();
+    const perCageMs = 3000;
+    const estimatedEndTime = new Date(startTime.getTime() + items.length * perCageMs);
+
+    set((state) => ({
+      inspection: {
+        ...state.inspection,
+        isActive: true,
+        startTime,
+        estimatedEndTime,
+      },
+    }));
+
+    const newRecords = [...inspectionRecords];
+
+    for (let i = 0; i < items.length; i++) {
+      const current = get();
+      if (!current.inspection.isActive) break;
+      const item = current.inspection.items[i];
+      if (item.status === 'skipped') continue;
+
+      set((state) => {
+        const newItems = [...state.inspection.items];
+        newItems[i] = { ...newItems[i], status: 'in_progress' };
+        return {
+          inspection: { ...state.inspection, items: newItems, currentIndex: i },
+        };
+      });
+
+      try {
+        await moveRobotTo(item.cageId);
+
+        const cage = get().cages.find(c => c.id === item.cageId);
+        const now = new Date();
+        const temperature = cage?.temperature ?? 25;
+        const humidity = cage?.humidity ?? 60;
+        const hasAlertDuring = cage?.hasAlert ?? false;
+        const alertType = cage?.alertType ?? null;
+
+        newRecords.push({
+          id: generateId(),
+          cageId: item.cageId,
+          inspectedAt: now,
+          temperature,
+          humidity,
+          hasAlert: hasAlertDuring,
+          alertType,
+        });
+
+        set((state) => {
+          const newItems = [...state.inspection.items];
+          newItems[i] = {
+            ...newItems[i],
+            status: 'completed',
+            inspectedAt: now,
+            temperature,
+            humidity,
+            hasAlertDuring,
+          };
+          return {
+            inspection: { ...state.inspection, items: newItems },
+            inspectionRecords: newRecords.slice(-200),
+          };
+        });
+
+        await new Promise(resolve => setTimeout(resolve, 800));
+      } catch {
+        set((state) => {
+          const newItems = [...state.inspection.items];
+          newItems[i] = { ...newItems[i], status: 'skipped' };
+          return {
+            inspection: { ...state.inspection, items: newItems },
+          };
+        });
+      }
+    }
+
+    set((state) => ({
+      inspection: { ...state.inspection, isActive: false },
+    }));
+  },
+
+  skipNextInspection: () => {
+    set((state) => {
+      const idx = state.inspection.currentIndex;
+      const nextIdx = state.inspection.items.findIndex(
+        (item, i) => i >= idx && item.status === 'pending'
+      );
+      if (nextIdx === -1) return state;
+      const newItems = [...state.inspection.items];
+      newItems[nextIdx] = { ...newItems[nextIdx], status: 'skipped' };
+      return {
+        inspection: { ...state.inspection, items: newItems },
+      };
+    });
+  },
+
+  cancelInspection: () => {
+    set((state) => ({
+      inspection: { ...state.inspection, isActive: false },
+    }));
+  },
+
+  computeHealthScores: () => {
+    const { cages, sensorHistory, lastValidConfig } = get();
+    const scores: Record<string, CageHealthScore> = {};
+    const now = new Date();
+
+    cages.forEach(cage => {
+      const cageHistory = sensorHistory
+        .filter(h => h.cageId === cage.id)
+        .sort((a, b) => b.time.getTime() - a.time.getTime())
+        .slice(0, 24);
+
+      let consecutiveAlerts = 0;
+      for (let i = 0; i < cageHistory.length; i++) {
+        const h = cageHistory[i];
+        const isAlert = h.temperature < lastValidConfig.tempMin || h.temperature > lastValidConfig.tempMax
+          || h.humidity < lastValidConfig.humidityMin || h.humidity > lastValidConfig.humidityMax;
+        if (isAlert) consecutiveAlerts++;
+        else break;
+      }
+      if (cage.hasAlert) consecutiveAlerts = Math.max(consecutiveAlerts, 1);
+
+      const hoursWithoutFeed = cage.lastFeedTime
+        ? (now.getTime() - cage.lastFeedTime.getTime()) / (1000 * 60 * 60)
+        : 999;
+
+      const tempValues = cageHistory.map(h => h.temperature);
+      const humidityValues = cageHistory.map(h => h.humidity);
+      const temperatureFluctuation = tempValues.length >= 2
+        ? Math.max(...tempValues) - Math.min(...tempValues)
+        : 0;
+      const humidityFluctuation = humidityValues.length >= 2
+        ? Math.max(...humidityValues) - Math.min(...humidityValues)
+        : 0;
+
+      let score = 100;
+      score -= Math.min(consecutiveAlerts * 10, 40);
+      score -= Math.min(hoursWithoutFeed * 2, 30);
+      score -= Math.min(temperatureFluctuation * 2, 15);
+      score -= Math.min(humidityFluctuation * 0.8, 15);
+      score = Math.max(0, Math.min(100, score));
+
+      let level: CageHealthScore['level'] = 'excellent';
+      if (score < 60) level = 'danger';
+      else if (score < 75) level = 'warning';
+      else if (score < 90) level = 'good';
+
+      scores[cage.id] = {
+        cageId: cage.id,
+        score: Math.round(score),
+        level,
+        factors: {
+          consecutiveAlerts,
+          hoursWithoutFeed: Math.round(hoursWithoutFeed * 10) / 10,
+          temperatureFluctuation: Math.round(temperatureFluctuation * 10) / 10,
+          humidityFluctuation: Math.round(humidityFluctuation * 10) / 10,
+        },
+      };
+    });
+
+    set({ healthScores: scores });
+  },
+
+  computeRiskRank: () => {
+    const { cages, healthScores } = get();
+
+    const rank: RiskRankItem[] = cages.map(cage => {
+      const hs = healthScores[cage.id];
+      const factors = hs?.factors ?? { consecutiveAlerts: 0, hoursWithoutFeed: 0, temperatureFluctuation: 0, humidityFluctuation: 0 };
+
+      const alertScore = factors.consecutiveAlerts * 10;
+      const feedScore = Math.min(factors.hoursWithoutFeed * 2, 30);
+      const fluctScore = Math.min((factors.temperatureFluctuation + factors.humidityFluctuation) * 1.2, 20);
+
+      let primaryRisk: RiskFactorKey = 'consecutiveAlerts';
+      let riskValue = alertScore;
+      if (feedScore > riskValue) {
+        primaryRisk = 'hoursWithoutFeed';
+        riskValue = feedScore;
+      }
+      if (fluctScore > riskValue) {
+        primaryRisk = 'fluctuation';
+        riskValue = fluctScore;
+      }
+
+      return {
+        cageId: cage.id,
+        floor: cage.floor,
+        position: cage.position,
+        healthScore: hs?.score ?? 80,
+        level: hs?.level ?? 'good',
+        primaryRisk,
+        riskValue: Math.round(riskValue * 10) / 10,
+      };
+    });
+
+    rank.sort((a, b) => a.healthScore - b.healthScore);
+
+    set({ riskRank: rank });
+  },
+
+  createFeedQueueFromRiskTop: (count: number) => {
+    const { riskRank, createFeedQueue } = get();
+    const topCages = riskRank.slice(0, Math.min(count, riskRank.length));
+    const items: FeedQueueItem[] = topCages.map(r => ({
+      cageId: r.cageId,
+      status: 'pending',
+    }));
+
+    set({
+      feedQueue: {
+        isActive: false,
+        items,
+        currentIndex: 0,
+        filterType: 'alert',
+      },
+    });
+  },
+
+  getFeedImpactAnalysis: (cageId: string) => {
+    const { feedRecords, sensorHistory } = get();
+    const cageFeeds = feedRecords
+      .filter(r => r.cageId === cageId)
+      .sort((a, b) => b.time.getTime() - a.time.getTime());
+
+    if (cageFeeds.length === 0) return null;
+
+    const lastFeed = cageFeeds[0];
+    const feedTime = lastFeed.time.getTime();
+    const twoHoursBefore = feedTime - 2 * 60 * 60 * 1000;
+    const twoHoursAfter = feedTime + 2 * 60 * 60 * 1000;
+
+    const beforeData = sensorHistory.filter(
+      h => h.cageId === cageId && h.time.getTime() >= twoHoursBefore && h.time.getTime() < feedTime
+    );
+    const afterData = sensorHistory.filter(
+      h => h.cageId === cageId && h.time.getTime() > feedTime && h.time.getTime() <= twoHoursAfter
+    );
+
+    if (beforeData.length === 0 || afterData.length === 0) return null;
+
+    const before = beforeData.reduce((s, h) => s + h.temperature, 0) / beforeData.length;
+    const after = afterData.reduce((s, h) => s + h.temperature, 0) / afterData.length;
+
+    return {
+      before: Math.round(before * 10) / 10,
+      after: Math.round(after * 10) / 10,
+      change: Math.round((after - before) * 10) / 10,
+    };
   },
 }));
